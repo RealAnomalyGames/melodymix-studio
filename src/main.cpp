@@ -5,7 +5,6 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
-#include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QListWidget>
@@ -18,10 +17,12 @@
 #include <QPaintEvent>
 #include <QPushButton>
 #include <QSignalBlocker>
+#include <QSoundEffect>
+#include <QSpinBox>
 #include <QStatusBar>
-#include <QVBoxLayout>
-#include <QWidget>
+#include <QTimer>
 #include <QUrl>
+#include <QWidget>
 
 #include <array>
 
@@ -38,7 +39,6 @@ protected:
     void paintEvent(QPaintEvent *) override
     {
         QPainter painter(this);
-        painter.setRenderHint(QPainter::Antialiasing, false);
 
         QLinearGradient gradient(0, 0, 0, height());
         gradient.setColorAt(0.0, QColor(105, 108, 106));
@@ -72,15 +72,25 @@ public:
         setToolTip(QStringLiteral("Step %1").arg(step + 1));
     }
 
+    void setPlayhead(bool active)
+    {
+        if (playhead_ != active) {
+            playhead_ = active;
+            update();
+        }
+    }
+
 protected:
     void paintEvent(QPaintEvent *) override
     {
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing, true);
 
-        const QRectF buttonRect = QRectF(rect()).adjusted(1.5, 1.5, -1.5, -1.5);
+        const QRectF buttonRect =
+            QRectF(rect()).adjusted(1.5, 1.5, -1.5, -1.5);
 
-        QLinearGradient gradient(buttonRect.topLeft(), buttonRect.bottomLeft());
+        QLinearGradient gradient(
+            buttonRect.topLeft(), buttonRect.bottomLeft());
 
         if (isChecked()) {
             gradient.setColorAt(0.0, QColor(192, 92, 89));
@@ -113,10 +123,19 @@ protected:
             painter.drawPoint(
                 QPointF(buttonRect.center().x(), buttonRect.bottom() - 4));
         }
+
+        // A pale metallic outline marks the currently playing step.
+        if (playhead_) {
+            painter.setBrush(Qt::NoBrush);
+            painter.setPen(QPen(QColor(244, 213, 139), 2.0));
+            painter.drawRoundedRect(
+                buttonRect.adjusted(0.5, 0.5, -0.5, -0.5), 3, 3);
+        }
     }
 
 private:
     int step_;
+    bool playhead_ = false;
 };
 
 class MainWindow : public QMainWindow
@@ -129,15 +148,30 @@ public:
         player_->setAudioOutput(audioOutput_);
         audioOutput_->setVolume(0.75);
 
-        patterns_.fill({});
+        sequencerTimer_.setTimerType(Qt::PreciseTimer);
 
-        setWindowTitle(QStringLiteral("MelodyMix Studio"));
-        resize(900, 600);
-        setMinimumSize(720, 480);
+        for (int channel = 0; channel < ChannelCount; ++channel) {
+            for (int voice = 0; voice < VoiceCount; ++voice) {
+                auto *effect = new QSoundEffect(this);
+                effect->setVolume(0.85);
+                effect->setLoopCount(1);
+                sampleVoices_[channel][voice] = effect;
 
-        buildInterface();
-        buildMenus();
-        displayPattern(0);
+                connect(effect, &QSoundEffect::statusChanged,
+                        this, [this, effect]() {
+                    if (effect->status() == QSoundEffect::Error) {
+                        statusBar()->showMessage(
+                            QStringLiteral(
+                                "A sample could not be loaded. Check that "
+                                "the WAV file is supported and accessible."),
+                            7000);
+                    }
+                });
+            }
+        }
+
+        connect(&sequencerTimer_, &QTimer::timeout,
+                this, [this]() { advanceStep(); });
 
         connect(player_, &QMediaPlayer::errorOccurred,
                 this, [this](QMediaPlayer::Error, const QString &message) {
@@ -150,29 +184,41 @@ public:
             if (state == QMediaPlayer::PlayingState) {
                 statusBar()->showMessage(
                     QStringLiteral("Previewing WAV file..."));
-            } else if (state == QMediaPlayer::StoppedState) {
-                statusBar()->showMessage(
-                    QStringLiteral("Ready"), 3000);
+            } else if (state == QMediaPlayer::StoppedState && !isPlaying_) {
+                statusBar()->showMessage(QStringLiteral("Ready"), 3000);
             }
         });
+
+        setWindowTitle(QStringLiteral("MelodyMix Studio"));
+        resize(900, 600);
+        setMinimumSize(720, 480);
+
+        buildInterface();
+        buildMenus();
+        displayPattern(0);
+        refreshAssignmentBoxes();
+
+        statusBar()->showMessage(
+            QStringLiteral("Ready — assign WAV samples and press PLAY."));
     }
 
 private:
-    struct Sound
-    {
-        QString path;
-        QString name;
-    };
-
     static constexpr int PatternCount = 9;
     static constexpr int ChannelCount = 4;
     static constexpr int StepCount = 16;
+    static constexpr int VoiceCount = 4;
 
     const std::array<QString, ChannelCount> channelNames_{
         QStringLiteral("KICK"),
         QStringLiteral("SNARE"),
         QStringLiteral("CLOSED HH"),
         QStringLiteral("OPEN HH")
+    };
+
+    struct Sound
+    {
+        QString path;
+        QString name;
     };
 
     std::array<
@@ -189,17 +235,32 @@ private:
 
     std::array<QPushButton *, PatternCount> patternButtons_{};
 
+    // Several voices allow sample tails and rapid repeated hits to overlap.
+    std::array<
+        std::array<QSoundEffect *, VoiceCount>,
+        ChannelCount> sampleVoices_{};
+
+    std::array<int, ChannelCount> nextVoice_{};
+
     QList<Sound> sounds_;
 
     int currentPattern_ = 0;
+    int currentStep_ = -1;
+    int bpm_ = 120;
+    bool isPlaying_ = false;
 
     QMediaPlayer *player_;
     QAudioOutput *audioOutput_;
+    QTimer sequencerTimer_;
 
     QListWidget *libraryList_ = nullptr;
     QLabel *assignmentSummary_ = nullptr;
     QLabel *patternTitle_ = nullptr;
     QLabel *stepCountLabel_ = nullptr;
+    QLabel *playbackLabel_ = nullptr;
+    QSpinBox *tempoControl_ = nullptr;
+    QPushButton *playButton_ = nullptr;
+    QPushButton *stopButton_ = nullptr;
 
     void buildInterface()
     {
@@ -216,7 +277,7 @@ private:
             " letter-spacing: 2px;");
 
         auto *version = new QLabel(
-            QStringLiteral("STUDIO 1 / BUILD 004 / v%1")
+            QStringLiteral("STUDIO 1 / BUILD 005 / v%1")
                 .arg(QStringLiteral(MELODY_MIX_VERSION)));
 
         version->setStyleSheet(
@@ -227,41 +288,75 @@ private:
         header->addWidget(version);
         rootLayout->addLayout(header);
 
+        // Transport and compact tempo control.
         auto *transport = new QHBoxLayout();
 
-        auto *playButton = new QPushButton(QStringLiteral("▶  PLAY"));
-        auto *stopButton = new QPushButton(QStringLiteral("■  STOP"));
+        playButton_ = new QPushButton(QStringLiteral("▶  PLAY"));
+        stopButton_ = new QPushButton(QStringLiteral("■  STOP"));
 
-        styleMetalButton(playButton);
-        styleMetalButton(stopButton);
+        styleMetalButton(playButton_);
+        styleMetalButton(stopButton_);
 
-        connect(playButton, &QPushButton::clicked, this, [this]() {
-            statusBar()->showMessage(
-                QStringLiteral("Sequencer playback will be added in Build 005."));
+        connect(playButton_, &QPushButton::clicked,
+                this, [this]() { startSequencer(); });
+
+        connect(stopButton_, &QPushButton::clicked,
+                this, [this]() { stopSequencer(); });
+
+        transport->addWidget(playButton_);
+        transport->addWidget(stopButton_);
+
+        auto *tempoLabel = new QLabel(QStringLiteral("TEMPO"));
+        tempoLabel->setStyleSheet(
+            "color: #e4e3d9; font-size: 10px; font-weight: bold;");
+
+        tempoControl_ = new QSpinBox();
+        tempoControl_->setRange(40, 250);
+        tempoControl_->setValue(bpm_);
+        tempoControl_->setSuffix(QStringLiteral(" BPM"));
+        tempoControl_->setFixedWidth(100);
+        tempoControl_->setMinimumHeight(27);
+        tempoControl_->setToolTip(
+            QStringLiteral("Tempo: 40–250 beats per minute"));
+        tempoControl_->setStyleSheet(
+            "QSpinBox { color: #eeeeE5; background: #292b29;"
+            " border: 1px solid #171917; padding: 3px;"
+            " font-size: 10px; }"
+            "QSpinBox::up-button, QSpinBox::down-button {"
+            " background: #60645f; width: 16px; border: 1px solid #252725; }");
+
+        connect(tempoControl_,
+                QOverload<int>::of(&QSpinBox::valueChanged),
+                this, [this](int value) {
+            bpm_ = value;
+            updateTimerInterval();
+
+            if (isPlaying_) {
+                statusBar()->showMessage(
+                    QStringLiteral("Tempo changed to %1 BPM").arg(bpm_), 2000);
+            }
         });
 
-        connect(stopButton, &QPushButton::clicked, this, [this]() {
-            player_->stop();
-            statusBar()->showMessage(QStringLiteral("Stopped"), 2000);
-        });
-
-        transport->addWidget(playButton);
-        transport->addWidget(stopButton);
-
-        auto *transportNote = new QLabel(
-            QStringLiteral("WAV PREVIEW ACTIVE  |  SEQUENCER AUDIO: BUILD 005"));
-
-        transportNote->setStyleSheet(
-            "color: #d4d5ce; font-size: 9px;");
-
+        transport->addSpacing(8);
+        transport->addWidget(tempoLabel);
+        transport->addWidget(tempoControl_);
         transport->addStretch();
-        transport->addWidget(transportNote);
+
+        playbackLabel_ = new QLabel(QStringLiteral("STOPPED"));
+        playbackLabel_->setAlignment(Qt::AlignCenter);
+        playbackLabel_->setMinimumWidth(76);
+        playbackLabel_->setStyleSheet(
+            "color: #d4d5ce; font-size: 9px; font-weight: bold;"
+            " background: #292b29; border: 1px solid #171917;"
+            " padding: 5px;");
+
+        transport->addWidget(playbackLabel_);
         rootLayout->addLayout(transport);
 
         auto *body = new QHBoxLayout();
         body->setSpacing(8);
 
-        // Pattern selector
+        // Pattern selector.
         auto *patternPanel = makeInsetPanel();
         patternPanel->setFixedWidth(104);
 
@@ -269,8 +364,8 @@ private:
         patternLayout->setContentsMargins(6, 8, 6, 8);
         patternLayout->setSpacing(5);
 
-        auto *patternHeading = makePanelHeading(QStringLiteral("PATTERNS"));
-        patternLayout->addWidget(patternHeading);
+        patternLayout->addWidget(
+            makePanelHeading(QStringLiteral("PATTERNS")));
 
         for (int i = 0; i < PatternCount; ++i) {
             auto *button = new QPushButton(
@@ -283,15 +378,14 @@ private:
             patternButtons_[i] = button;
             patternLayout->addWidget(button);
 
-            connect(button, &QPushButton::clicked, this, [this, i]() {
-                displayPattern(i);
-            });
+            connect(button, &QPushButton::clicked,
+                    this, [this, i]() { displayPattern(i); });
         }
 
         patternLayout->addStretch();
         body->addWidget(patternPanel);
 
-        // Sequencer
+        // Sequencer grid.
         auto *sequencerPanel = makeInsetPanel();
         auto *sequencerLayout = new QVBoxLayout(sequencerPanel);
         sequencerLayout->setContentsMargins(8, 8, 8, 8);
@@ -361,15 +455,15 @@ private:
         sequencerLayout->addStretch();
 
         auto *legend = new QLabel(
-            QStringLiteral("DARK = OFF     RED = ON     • = BEAT MARKER"));
+            QStringLiteral(
+                "DARK = OFF     RED = ON     GOLD OUTLINE = PLAYHEAD"));
 
-        legend->setStyleSheet(
-            "color: #c1c3ba; font-size: 9px;");
-
+        legend->setStyleSheet("color: #c1c3ba; font-size: 9px;");
         sequencerLayout->addWidget(legend);
+
         body->addWidget(sequencerPanel, 1);
 
-        // WAV library and channel assignments
+        // WAV library and channel assignments.
         auto *libraryPanel = makeInsetPanel();
         libraryPanel->setFixedWidth(192);
 
@@ -391,9 +485,12 @@ private:
 
         libraryLayout->addWidget(libraryList_, 1);
 
-        auto *importButton = new QPushButton(QStringLiteral("IMPORT WAV..."));
-        auto *previewButton = new QPushButton(QStringLiteral("▶  PREVIEW"));
-        auto *removeButton = new QPushButton(QStringLiteral("REMOVE"));
+        auto *importButton = new QPushButton(
+            QStringLiteral("IMPORT WAV..."));
+        auto *previewButton = new QPushButton(
+            QStringLiteral("▶  PREVIEW"));
+        auto *removeButton = new QPushButton(
+            QStringLiteral("REMOVE"));
 
         styleMetalButton(importButton);
         styleMetalButton(previewButton);
@@ -441,6 +538,7 @@ private:
                         assignmentBoxes_[channel]->itemData(index).toString();
                 }
 
+                configureChannelVoices(channel);
                 updateAssignmentSummary();
             });
         }
@@ -453,34 +551,34 @@ private:
             "color: #c4c5bc; font-size: 9px;");
 
         libraryLayout->addWidget(assignmentSummary_);
+
         body->addWidget(libraryPanel);
-
         rootLayout->addLayout(body, 1);
-
         setCentralWidget(root);
 
         statusBar()->setStyleSheet(
             "QStatusBar { background: #292b29; color: #d9d9d0;"
             " border-top: 1px solid #777a76; }");
-
-        statusBar()->showMessage(
-            QStringLiteral("Ready — import a WAV file to begin."));
-        refreshAssignmentBoxes();
     }
 
     void buildMenus()
     {
         auto *fileMenu = menuBar()->addMenu(QStringLiteral("&File"));
 
-        auto *newAction = fileMenu->addAction(QStringLiteral("&New Project"));
+        auto *newAction = fileMenu->addAction(
+            QStringLiteral("&New Project"));
+
         auto *importAction = fileMenu->addAction(
             QStringLiteral("Import &WAV Files..."));
 
         fileMenu->addSeparator();
 
-        auto *exitAction = fileMenu->addAction(QStringLiteral("E&xit"));
+        auto *exitAction = fileMenu->addAction(
+            QStringLiteral("E&xit"));
 
         connect(newAction, &QAction::triggered, this, [this]() {
+            stopSequencer();
+
             for (auto &pattern : patterns_) {
                 for (auto &channel : pattern) {
                     channel.fill(false);
@@ -505,6 +603,7 @@ private:
                 this, [this]() { close(); });
 
         auto *editMenu = menuBar()->addMenu(QStringLiteral("&Edit"));
+
         auto *clearAction = editMenu->addAction(
             QStringLiteral("Clear Current Pattern"));
 
@@ -519,6 +618,7 @@ private:
         });
 
         auto *helpMenu = menuBar()->addMenu(QStringLiteral("&Help"));
+
         auto *aboutAction = helpMenu->addAction(
             QStringLiteral("&About MelodyMix Studio"));
 
@@ -528,9 +628,10 @@ private:
                 QStringLiteral("About MelodyMix Studio"),
                 QStringLiteral(
                     "MelodyMix Studio\n"
-                    "Studio 1 — Build 004\n\n"
+                    "Studio 1 — Build 005\n\n"
                     "A Windows 95-inspired industrial step sequencer.\n"
-                    "Build 004 introduces the WAV library and audio preview."));
+                    "Build 005 adds looping playback, tempo control, "
+                    "and the four-channel audio engine."));
         });
     }
 
@@ -595,8 +696,12 @@ private:
         for (int channel = 0; channel < ChannelCount; ++channel) {
             for (int step = 0; step < StepCount; ++step) {
                 const QSignalBlocker blocker(stepButtons_[channel][step]);
+
                 stepButtons_[channel][step]->setChecked(
                     patterns_[index][channel][step]);
+
+                stepButtons_[channel][step]->setPlayhead(
+                    isPlaying_ && step == currentStep_);
             }
         }
 
@@ -617,6 +722,148 @@ private:
 
         stepCountLabel_->setText(
             QStringLiteral("%1 ACTIVE STEPS").arg(count));
+    }
+
+    void updatePlayhead()
+    {
+        for (int channel = 0; channel < ChannelCount; ++channel) {
+            for (int step = 0; step < StepCount; ++step) {
+                stepButtons_[channel][step]->setPlayhead(
+                    isPlaying_ && step == currentStep_);
+            }
+        }
+    }
+
+    void updateTimerInterval()
+    {
+        // One sixteenth-note step: a quarter-note beat divided by four.
+        const int intervalMs = qMax(1, qRound(15000.0 / bpm_));
+        sequencerTimer_.setInterval(intervalMs);
+    }
+
+    void startSequencer()
+    {
+        if (isPlaying_) {
+            return;
+        }
+
+        // Do not let the library preview overlap the sequencer on start.
+        player_->stop();
+        player_->setSource(QUrl());
+
+        for (int channel = 0; channel < ChannelCount; ++channel) {
+            for (int voice = 0; voice < VoiceCount; ++voice) {
+                sampleVoices_[channel][voice]->stop();
+            }
+            nextVoice_[channel] = 0;
+        }
+
+        updateTimerInterval();
+
+        isPlaying_ = true;
+        currentStep_ = 0;
+
+        playbackLabel_->setText(QStringLiteral("PLAYING"));
+        playbackLabel_->setStyleSheet(
+            "color: #f4d58b; font-size: 9px; font-weight: bold;"
+            " background: #292b29; border: 1px solid #a88b52;"
+            " padding: 5px;");
+
+        updatePlayhead();
+        triggerCurrentStep();
+
+        sequencerTimer_.start();
+
+        statusBar()->showMessage(
+            QStringLiteral("Playing — %1 BPM, looping Pattern %2")
+                .arg(bpm_)
+                .arg(currentPattern_ + 1));
+    }
+
+    void stopSequencer()
+    {
+        sequencerTimer_.stop();
+        isPlaying_ = false;
+        currentStep_ = -1;
+
+        for (int channel = 0; channel < ChannelCount; ++channel) {
+            for (int voice = 0; voice < VoiceCount; ++voice) {
+                sampleVoices_[channel][voice]->stop();
+            }
+        }
+
+        player_->stop();
+        updatePlayhead();
+
+        if (playbackLabel_) {
+            playbackLabel_->setText(QStringLiteral("STOPPED"));
+            playbackLabel_->setStyleSheet(
+                "color: #d4d5ce; font-size: 9px; font-weight: bold;"
+                " background: #292b29; border: 1px solid #171917;"
+                " padding: 5px;");
+        }
+
+        statusBar()->showMessage(QStringLiteral("Stopped"), 2500);
+    }
+
+    void advanceStep()
+    {
+        if (!isPlaying_) {
+            return;
+        }
+
+        currentStep_ = (currentStep_ + 1) % StepCount;
+
+        updatePlayhead();
+        triggerCurrentStep();
+    }
+
+    void triggerCurrentStep()
+    {
+        if (currentStep_ < 0 || currentStep_ >= StepCount) {
+            return;
+        }
+
+        for (int channel = 0; channel < ChannelCount; ++channel) {
+            if (!patterns_[currentPattern_][channel][currentStep_]) {
+                continue;
+            }
+
+            if (assignments_[channel].isEmpty()) {
+                continue;
+            }
+
+            triggerSample(channel);
+        }
+    }
+
+    void triggerSample(int channel)
+    {
+        const QString assignedPath = assignments_[channel];
+
+        if (assignedPath.isEmpty() || !QFileInfo::exists(assignedPath)) {
+            return;
+        }
+
+        // Select a voice in round-robin order to allow overlapping hits.
+        const int voiceIndex = nextVoice_[channel];
+        nextVoice_[channel] = (voiceIndex + 1) % VoiceCount;
+
+        QSoundEffect *effect = sampleVoices_[channel][voiceIndex];
+
+        // The assignment update normally loads this source ahead of time.
+        if (effect->source().toLocalFile() != assignedPath) {
+            effect->setSource(QUrl::fromLocalFile(assignedPath));
+        }
+
+        if (effect->status() == QSoundEffect::Ready) {
+            effect->play();
+        } else if (effect->status() == QSoundEffect::Error) {
+            statusBar()->showMessage(
+                QStringLiteral("Could not play sample: %1")
+                    .arg(QFileInfo(assignedPath).fileName()),
+                5000);
+        }
     }
 
     bool isValidWav(const QString &path) const
@@ -652,9 +899,13 @@ private:
         for (const QString &path : files) {
             bool alreadyAdded = false;
 
+            const QString canonicalPath =
+                QFileInfo(path).canonicalFilePath();
+
             for (const Sound &sound : sounds_) {
-                if (QFileInfo(sound.path).canonicalFilePath()
-                    == QFileInfo(path).canonicalFilePath()) {
+                if (!canonicalPath.isEmpty()
+                    && QFileInfo(sound.path).canonicalFilePath()
+                        == canonicalPath) {
                     alreadyAdded = true;
                     break;
                 }
@@ -667,12 +918,14 @@ private:
 
             if (!isValidWav(path)) {
                 ++skipped;
+
                 QMessageBox::warning(
                     this,
                     QStringLiteral("Invalid WAV File"),
                     QStringLiteral(
                         "This file could not be recognized as a readable "
                         "WAV file:\n\n%1").arg(path));
+
                 continue;
             }
 
@@ -693,7 +946,8 @@ private:
         refreshAssignmentBoxes();
 
         if (imported > 0) {
-            libraryList_->setCurrentRow(libraryList_->count() - imported);
+            libraryList_->setCurrentRow(
+                libraryList_->count() - imported);
         }
 
         statusBar()->showMessage(
@@ -715,13 +969,19 @@ private:
             return;
         }
 
+        // Keep preview playback separate from the sequencer.
+        if (isPlaying_) {
+            stopSequencer();
+        }
+
         const QString path = item->data(Qt::UserRole).toString();
 
         if (!QFileInfo::exists(path) || !QFileInfo(path).isFile()) {
             QMessageBox::warning(
                 this,
                 QStringLiteral("WAV File Not Found"),
-                QStringLiteral("The original file is no longer available:\n%1")
+                QStringLiteral(
+                    "The original file is no longer available:\n%1")
                     .arg(path));
             return;
         }
@@ -749,6 +1009,7 @@ private:
         for (int channel = 0; channel < ChannelCount; ++channel) {
             if (assignments_[channel] == removedPath) {
                 assignments_[channel].clear();
+                configureChannelVoices(channel);
             }
         }
 
@@ -763,8 +1024,28 @@ private:
         refreshAssignmentBoxes();
 
         statusBar()->showMessage(
-            QStringLiteral("Removed from library. Original file was not deleted."),
+            QStringLiteral(
+                "Removed from library. Original file was not deleted."),
             5000);
+    }
+
+    void configureChannelVoices(int channel)
+    {
+        const QString path = assignments_[channel];
+
+        for (int voice = 0; voice < VoiceCount; ++voice) {
+            QSoundEffect *effect = sampleVoices_[channel][voice];
+
+            effect->stop();
+
+            if (path.isEmpty()) {
+                effect->setSource(QUrl());
+            } else {
+                effect->setSource(QUrl::fromLocalFile(path));
+            }
+        }
+
+        nextVoice_[channel] = 0;
     }
 
     void refreshAssignmentBoxes()
@@ -777,8 +1058,10 @@ private:
             }
 
             const QSignalBlocker blocker(combo);
+
             combo->clear();
-            combo->addItem(QStringLiteral("(No sound assigned)"), QString());
+            combo->addItem(
+                QStringLiteral("(No sound assigned)"), QString());
 
             for (const Sound &sound : sounds_) {
                 combo->addItem(sound.name, sound.path);
@@ -787,13 +1070,15 @@ private:
             int selectedIndex = 0;
 
             for (int i = 1; i < combo->count(); ++i) {
-                if (combo->itemData(i).toString() == assignments_[channel]) {
+                if (combo->itemData(i).toString()
+                    == assignments_[channel]) {
                     selectedIndex = i;
                     break;
                 }
             }
 
             combo->setCurrentIndex(selectedIndex);
+            configureChannelVoices(channel);
         }
 
         updateAssignmentSummary();
