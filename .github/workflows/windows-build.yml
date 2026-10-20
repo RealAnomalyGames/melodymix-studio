@@ -1,3 +1,4 @@
+
 name: Windows Build
 
 on:
@@ -56,7 +57,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path $package |
             Out-Null
 
-          Copy-Item $exe $package
+          Copy-Item $exe $package/
 
           & "$env:QT_ROOT_DIR/bin/windeployqt.exe" `
             --release `
@@ -75,28 +76,58 @@ jobs:
             -DestinationPath "package/MelodyMixStudio-windows-x64.zip" `
             -Force
 
-      - name: Generate SHA-256 checksum
+      - name: Generate SHA-256 checksums
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $releaseZip = "package/MelodyMixStudio-windows-x64.zip"
+          $exe = "package/MelodyMixStudio/MelodyMixStudio.exe"
+
+          $zipHash = (Get-FileHash $releaseZip -Algorithm SHA256).Hash.ToLower()
+          $exeHash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
+
+          "$zipHash  MelodyMixStudio-windows-x64.zip" |
+            Out-File `
+              -FilePath "package/MelodyMixStudio-windows-x64.zip.sha256" `
+              -Encoding ascii
+
+          "$exeHash  MelodyMixStudio.exe" |
+            Out-File `
+              -FilePath "package/MelodyMixStudio/MelodyMixStudio.exe.sha256" `
+              -Encoding ascii
+
+          Write-Output "Release ZIP SHA-256: $zipHash"
+          Write-Output "Executable SHA-256: $exeHash"
+
+      - name: Verify release ZIP checksum
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
           $file = "package/MelodyMixStudio-windows-x64.zip"
-          $hash = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
+          $checksumFile = "$file.sha256"
 
-          "$hash  MelodyMixStudio-windows-x64.zip" |
-            Out-File `
-              -FilePath "package/MelodyMixStudio-windows-x64.zip.sha256" `
-              -Encoding ascii
+          $expectedLine = Get-Content $checksumFile -Raw
+          if ($expectedLine -notmatch '^([0-9a-fA-F]{64})\s+') {
+            throw "Checksum file has an invalid format."
+          }
 
-          Write-Output "SHA-256: $hash"
+          $expected = $Matches[1].ToLower()
+          $actual = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
 
-      - name: Upload build and checksum
+          if ($actual -ne $expected) {
+            throw "SHA-256 verification failed."
+          }
+
+          Write-Output "Release ZIP checksum verified successfully."
+
+      - name: Upload unpacked application for testing
         uses: actions/upload-artifact@v4
         with:
           name: MelodyMixStudio-windows-x64
           path: |
-            package/MelodyMixStudio-windows-x64.zip
-            package/MelodyMixStudio-windows-x64.zip.sha256
+            package/MelodyMixStudio/**
           if-no-files-found: error
           retention-days: 30
 
